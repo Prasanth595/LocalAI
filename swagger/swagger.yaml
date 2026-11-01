@@ -2834,8 +2834,10 @@ definitions:
         type: string
       path:
         description: |-
-          Path is the folder's path in your files now ("/" is all of them). It
-          is absent when the folder is missing or not chosen.
+          Path is home-relative ("/" is the whole home), or /shared/<name>/...
+          for a followed readable shared folder. It is absent when missing,
+          not chosen, or readable outside these public locations; a readable
+          folder without a public path still has state ok.
         type: string
       state:
         description: |-
@@ -2962,7 +2964,9 @@ definitions:
         description: |-
           Folder chooses the one folder the agent's chats work in. A write
           without it keeps the folder the agent has; {"path": ""} clears it. In
-          an export file it is the folder's path and mode when the file was made.
+          an export file it is the home-relative path and mode when the file was
+          made. A missing, unchosen or non-home folder has an empty export path;
+          import preserves its mode as unset and warns instead of clearing scope.
       instructions:
         type: string
       mcp_servers:
@@ -12025,7 +12029,8 @@ paths:
           schema:
             $ref: '#/definitions/schema.ErrorResponse'
         "409":
-          description: The saved agent's folder is missing or not chosen (agent_folder_missing)
+          description: The saved agent's folder is missing or not chosen (agent_folder_missing),
+            or its complete file access exceeds the folder limit (agent_folder_limit)
           schema:
             $ref: '#/definitions/schema.ErrorResponse'
       summary: Start a chat.
@@ -13163,7 +13168,8 @@ paths:
             $ref: '#/definitions/schema.ErrorResponse'
         "409":
           description: A turn is running for a command, or the saved agent's folder
-            is missing (agent_folder_missing)
+            is missing (agent_folder_missing), or its complete file access exceeds
+            the folder limit (agent_folder_limit)
           schema:
             $ref: '#/definitions/schema.ErrorResponse'
       summary: Send a message to a chat.
@@ -14026,10 +14032,11 @@ paths:
     get:
       description: Returns the definition as a JSON file (version, kind localai-agent,
         agent). It holds no ID, owner or time. An agent with a folder is version 2
-        and carries folder {path, mode}, the folder's path in your files now (empty
-        when the folder is missing or not chosen); a server that knows only version
-        1 refuses it. An agent without a folder is version 1. POST /api/chats/agents/import
-        reads it. This replaces the old /api/agents/{name}/export.
+        and carries folder {path, mode}, the folder's home-relative path now (empty
+        when the folder is missing, not chosen, or outside your home, even if readable);
+        importing an empty path preserves the scope as unset with a warning; a server
+        that knows only version 1 refuses it. An agent without a folder is version
+        1. POST /api/chats/agents/import reads it. This replaces the old /api/agents/{name}/export.
       parameters:
       - description: the agent's id
         in: path
