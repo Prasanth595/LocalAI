@@ -27,12 +27,16 @@ var ErrNotSent = fmt.Errorf("the add-on is not running now and nothing was sent:
 type Gateway struct {
 	Connectors         ConnectorSource
 	ConnectorAuthority ConnectorAuthority
-	Limits             RelayLimits
-	Manager            *addons.Manager
-	Runtime            CurrentRuntime
-	Forward            *Carrier
-	Admission          Admission
-	Resolver           ResourceResolver
+	// AuthorizeExecutionStatus must revalidate current provider selection revision,
+	// execution feature permission, access and builtin replacement authority on the owner.
+	// Nil denies all observations. Status is never selection authorization.
+	AuthorizeExecutionStatus func(context.Context, contract.Actor, ExecutionStatusBinding) error
+	Limits                   RelayLimits
+	Manager                  *addons.Manager
+	Runtime                  CurrentRuntime
+	Forward                  *Carrier
+	Admission                Admission
+	Resolver                 ResourceResolver
 	// Tools reports the tools each installed add-on declares. When nil the
 	// Manager is used; with neither, a request that names a tool is denied.
 	Tools ToolSource
