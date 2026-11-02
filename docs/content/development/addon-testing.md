@@ -416,3 +416,25 @@ and that the database and the backups are untouched.
   runtime client types the add-on's HTTP 400 and 422 as a refusal, and the host answers
   it the same way from the apply, read, proposal, chat and artifact paths, and from the
   owner and every frontend. The authorization specs pin the exact status.
+
+### Execution selection mutation epochs
+
+`ApplicationConfig.ChatSelectionSnapshot` returns detached provider pins, the
+host-command mode, and a monotonic epoch. Runtime settings and
+`WithChatsHostExec` use the synchronized setters. Config value copies share
+selection ownership; they do not copy a live mutex. Public selection fields
+remain legacy startup inputs and serialization mirrors. Set them only before
+construction/first snapshot; use setters for subsequent changes. Direct field
+writes after initialization are not supported selection mutations.
+
+`Manager.SelectionEpoch` advances at changed lifecycle publication, runtime
+ownership transitions, recovery quiescence/resume/release, and owner close.
+Reads and unchanged lifecycle publications do not advance it. Both epochs are
+per-instance lifetime tokens, not persisted revisions or execution grants.
+An owner binding must still validate the actual current runtime incarnation:
+a supervisor restart can change incarnation without a Manager mutation.
+
+The epoch tests cover provider and host-mode ABA, detached maps, config value
+copies, lifecycle ABA, and real candidate rollback/recovery process changes.
+This is mutation tracking only. Request binding and session integration remain
+separate work; readiness never grants execution authority.
