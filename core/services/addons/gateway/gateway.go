@@ -29,7 +29,7 @@ type Gateway struct {
 	ConnectorAuthority ConnectorAuthority
 	// ResolveExecutionBinding loads actor-owned context on the owner. Nil denies.
 	ResolveExecutionBinding func(context.Context, contract.Actor, ExecutionBindingClaim) (ExecutionStatusBinding, error)
-	// AuthorizeExecutionStatus must revalidate current provider selection revision,
+	// AuthorizeExecutionStatus must revalidate current provider current selection,
 	// execution feature permission, access and builtin replacement authority on the owner.
 	// Nil denies all observations. Status is never selection authorization.
 	AuthorizeExecutionStatus func(context.Context, contract.Actor, ExecutionStatusBinding) error

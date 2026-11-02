@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -100,8 +99,7 @@ type Migrator interface {
 type Manager struct {
 	// One lock also serializes journal publication across addons. No operation can
 	// overtake another operation on the same addon, including reconciliation.
-	mu             sync.Mutex
-	selectionEpoch uint64
+	mu sync.Mutex
 	// opMu serializes Submit and Reconcile as whole operations, so mu can be
 	// released around a slow fetch without letting another operation in.
 	opMu                    sync.Mutex
@@ -262,9 +260,6 @@ func (m *Manager) Close() error {
 	defer m.mu.Unlock()
 	if m.closed && m.release == nil {
 		return nil
-	}
-	if !m.closed {
-		m.selectionEpoch++
 	}
 	m.closed = true
 	if m.updates != nil {
@@ -682,9 +677,6 @@ func (m *Manager) resolveRelease(ctx context.Context, cmd LifecycleCommand) (cat
 }
 
 func (m *Manager) apply(op journalOperation) (OperationStatus, error) {
-	if !reflect.DeepEqual(m.journal.Addons[op.Command.AddonID], *op.Next) {
-		m.selectionEpoch++
-	}
 	m.journal.Addons[op.Command.AddonID] = copyStatus(*op.Next)
 	op.Status.Phase = "applied"
 	m.journal.Operations[op.Command.OperationID] = op
@@ -902,11 +894,9 @@ func (m *Manager) startCandidate(ctx context.Context, id string, prev Status, re
 	if e := m.runtime.Stop(detached, instance); e != nil {
 		return e
 	}
-	m.selectionEpoch++
 	delete(m.instances, id)
 	started, e := m.runtime.Start(ctx, receipt, number)
 	if e == nil {
-		m.selectionEpoch++
 		m.instances[id] = started
 		delete(m.startFailed, id)
 		return nil
@@ -917,7 +907,6 @@ func (m *Manager) startCandidate(ctx context.Context, id string, prev Status, re
 		}
 		back, be := m.runtime.Start(detached, g.Receipt, g.Number)
 		if be == nil {
-			m.selectionEpoch++
 			m.instances[id] = back
 			delete(m.startFailed, id)
 			continue
@@ -959,7 +948,6 @@ func (m *Manager) syncRuntime(ctx context.Context, target string) error {
 			if e := m.runtime.Stop(ctx, instance); e != nil {
 				return e
 			}
-			m.selectionEpoch++
 			delete(m.instances, id)
 		}
 	}
@@ -1023,7 +1011,6 @@ func (m *Manager) syncRuntime(ctx context.Context, target string) error {
 			continue
 		}
 		delete(m.startFailed, l.id)
-		m.selectionEpoch++
 		m.instances[l.id] = l.instance
 	}
 	return cancelled
