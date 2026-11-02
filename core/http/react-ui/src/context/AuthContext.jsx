@@ -1,4 +1,4 @@
-import { useContext, useState, useEffect } from 'react'
+import { useContext, useState, useEffect, useRef, useCallback } from 'react'
 import { apiUrl } from '../utils/basePath'
 import { AuthContext } from './authState'
 
@@ -12,10 +12,20 @@ export function AuthProvider({ children }) {
     permissions: {},
   })
 
+  // Background work can outlive its initiating view. Keep its non-secret
+  // authority here, and invalidate before React schedules consumer renders.
+  const authority = useRef({})
+  const captureSessionAuthority = useCallback(() => {
+    const origin = authority.current
+    return () => origin !== null && authority.current === origin
+  }, [])
+  const invalidateAuthority = () => { if (authority.current !== null) authority.current = {} }
+
   const fetchStatus = () => {
     return fetch(apiUrl('/api/auth/status'))
       .then(r => r.json())
       .then(data => {
+        invalidateAuthority()
         const user = data.user || null
         const permissions = user?.permissions || {}
         setState(previous => ({
@@ -28,16 +38,20 @@ export function AuthProvider({ children }) {
         }))
       })
       .catch(() => {
+        invalidateAuthority()
         setState(previous => ({ sessionEpoch: previous.sessionEpoch + 1, loading: false, authEnabled: false, staticApiKeyRequired: false, user: null, permissions: {} }))
       })
   }
 
   useEffect(() => {
+    authority.current = {}
     fetchStatus()
+    return () => { authority.current = null }
   }, [])
 
   const logout = async () => {
     // Invalidate in-flight observations before waiting for logout or navigation.
+    invalidateAuthority()
     setState(previous => ({ ...previous, sessionEpoch: previous.sessionEpoch + 1, user: null, permissions: {} }))
     try {
       await fetch(apiUrl('/api/auth/logout'), { method: 'POST' })
@@ -60,6 +74,7 @@ export function AuthProvider({ children }) {
   const value = {
     // A local, non-secret epoch: even same-user authentication refreshes invalidate observations.
     sessionEpoch: state.sessionEpoch,
+    captureSessionAuthority,
     loading: state.loading,
     authEnabled: state.authEnabled,
     staticApiKeyRequired: state.staticApiKeyRequired,
