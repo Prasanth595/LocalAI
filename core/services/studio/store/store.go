@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mudler/LocalAI/core/services/studio/egress"
+	"github.com/mudler/LocalAI/core/services/studio/memory"
 	"github.com/mudler/LocalAI/core/services/studio/session"
 )
 
@@ -77,6 +78,18 @@ type TurnInfo struct {
 // Store is the studio loop's storage.
 type Store interface {
 	session.Store
+	AcceptMemoryInput(context.Context, MemoryAcceptance) (AcceptedInput, error)
+	CompleteMemoryTurn(context.Context, MemoryTurnCompletion) error
+	ClaimCapture(context.Context, string, time.Time, time.Duration) (CaptureClaim, error)
+	ApplyCapture(context.Context, CaptureClaim, memory.Transition) error
+	ListCaptures(context.Context, string, string) ([]CaptureRecord, error)
+	RetryCapture(context.Context, string, string, string) error
+
+	// FrozenMemory returns the immutable explicit-tool request identified by
+	// principal/chat/agent/call. The create callback runs under the chat lock only if absent;
+	// concurrent callers receive the same durable winner before any backend write.
+	// A nil callback only reads. This is not the automatic capture queue.
+	FrozenMemory(ctx context.Context, principal, chatID, agentID, invocation string, create func() ([]byte, error)) ([]byte, error)
 
 	// AddPending queues text as the next message, after the pending ones.
 	AddPending(ctx context.Context, principal, chatID, text string) (Pending, error)

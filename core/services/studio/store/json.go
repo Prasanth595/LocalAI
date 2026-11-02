@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,9 +35,12 @@ import (
 // each other. A goroutine that holds a chat lock may take mu (DeleteChat);
 // one that holds mu never takes a chat lock.
 type jsonStore struct {
-	mu    sync.Mutex
-	dir   string // empty: memory only
-	chats map[string]*chatSlot
+	memoryMu sync.Mutex // serializes explicit memory request preparation, never held by chat readers
+	mu       sync.Mutex
+	dir      string // empty: memory only
+	chats    map[string]*chatSlot
+	// removeChatFile is an internal cleanup fault seam; nil uses os.Remove.
+	removeChatFile func(string) error
 }
 
 // chatSlot is one chat with its lock. gone is set, under the lock, when the
@@ -49,6 +53,10 @@ type chatSlot struct {
 }
 
 type chatState struct {
+	captureContext       context.Context   `json:"-"`
+	Capture              captureData       `json:"capture,omitempty"`
+	Deleted              bool              `json:"deleted,omitempty"`
+	FrozenMemoryRequests map[string][]byte `json:"frozen_memory_requests,omitempty"`
 	// Rec.HarnessState is not in the record file: it is in the state file of
 	// generation StateGen. A record without StateGen keeps it inline, as the
 	// records written before the state file existed did.
@@ -90,6 +98,10 @@ func NewJSON(dir string) (Store, error) {
 		var c chatState
 		if err := json.Unmarshal(raw, &c); err != nil || c.Rec.ID == "" {
 			xlog.Warn("studio store: skipping damaged chat record", "file", filepath.Base(p), "error", err)
+			continue
+		}
+		if c.Deleted {
+			s.chats[c.Rec.ID] = &chatSlot{chatState: c, gone: true}
 			continue
 		}
 		if c.Run != "" {
@@ -367,7 +379,7 @@ func (s *jsonStore) lock(id string) (c *chatSlot, unlock func(), err error) {
 		return nil, nil, session.ErrNotFound
 	}
 	c.mu.Lock()
-	if c.gone {
+	if c.gone || c.Deleted {
 		c.mu.Unlock()
 		return nil, nil, session.ErrNotFound
 	}
@@ -412,16 +424,45 @@ func (s *jsonStore) records(keep func(session.ChatRecord) bool) []session.ChatRe
 	return out
 }
 
-// CreateChat holds the map lock while it writes the new chat's files: the ID
-// must stay taken until the chat exists or the write failed. Creating a chat
-// is rare next to the other operations.
+// CreateChat holds the map lock while writing a new chat, as creation is rare.
+// For an existing ID it first takes that slot's lock without holding mu, then
+// rechecks the map. This waits through deletion's file cleanup before reusing
+// paths, and follows the slot-before-map order without blocking other IDs
+// while waiting. A competing creator may have replaced the slot meanwhile.
 func (s *jsonStore) CreateChat(_ context.Context, rec session.ChatRecord) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.chats[rec.ID]; ok {
-		return session.ErrExists
+	var retained captureData
+	for {
+		s.mu.Lock()
+		old, ok := s.chats[rec.ID]
+		if !ok {
+			break
+		}
+		s.mu.Unlock()
+		old.mu.Lock()
+		s.mu.Lock()
+		if s.chats[rec.ID] != old {
+			s.mu.Unlock()
+			old.mu.Unlock()
+			continue
+		}
+		if !old.Deleted {
+			s.mu.Unlock()
+			old.mu.Unlock()
+			return session.ErrExists
+		}
+		// Keep the slot locked, but let unrelated IDs proceed during cleanup.
+		s.mu.Unlock()
+		if err := s.cleanupDeletedChat(rec.ID); err != nil {
+			old.mu.Unlock()
+			return err
+		}
+		s.mu.Lock()
+		retained = old.Capture
+		defer old.mu.Unlock()
+		break
 	}
-	c := chatState{Rec: rec}
+	defer s.mu.Unlock()
+	c := chatState{Rec: rec, Capture: retained}
 	c.Rec.HarnessState = nil
 	c.Rec.Egress = rec.Egress.Clone()
 	c.Rec.Goal = rec.Goal.Clone()
@@ -440,7 +481,13 @@ func (s *jsonStore) CreateChat(_ context.Context, rec session.ChatRecord) error 
 	return nil
 }
 
-func (s *jsonStore) GetChat(_ context.Context, principal, id string) (session.ChatRecord, error) {
+func (s *jsonStore) GetChat(ctx context.Context, principal, id string) (session.ChatRecord, error) {
+	if rec, ok := captureChatRead(ctx, s, principal, id); ok {
+		if rec.Principal != principal {
+			return session.ChatRecord{}, session.ErrNotFound
+		}
+		return rec, ctx.Err()
+	}
 	c, unlock, err := s.get(principal, id)
 	if err != nil {
 		return session.ChatRecord{}, err
@@ -662,22 +709,60 @@ func (s *jsonStore) DeleteChat(_ context.Context, principal, id string) error {
 		return err
 	}
 	defer unlock()
-	if s.dir != "" {
-		files := []string{s.file(id, ".json"), s.file(id, ".entries")}
-		if c.StateGen > 0 {
-			files = append(files, s.stateFile(id, c.StateGen))
-		}
-		for _, f := range files {
-			if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
+	// Publish a minimal tombstone before removing old files. A crash during
+	// cleanup cannot load the old state or release its idempotency keys.
+	next := chatState{Rec: session.ChatRecord{ID: id, Principal: principal}, Deleted: true, Capture: tombstoneCapture(c.Capture)}
+	if err := s.save(&next); err != nil {
+		return err
+	}
+	c.chatState = next
+	c.gone = true
+	return s.cleanupDeletedChat(id)
+}
+
+// cleanupDeletedChat runs with the deleted slot locked. Minimal tombstones do
+// not retain StateGen, so remove every generation belonging to exactly this
+// ID before its paths can be reused. Sync even on a retry with no files left:
+// a previous attempt may have removed them but failed to make that durable.
+func (s *jsonStore) cleanupDeletedChat(id string) error {
+	if s.dir == "" {
+		return nil
+	}
+	names, err := os.ReadDir(s.chatDir())
+	if err != nil {
+		return err
+	}
+	base := filepath.Base(s.file(id, ""))
+	remove := s.removeChatFile
+	if remove == nil {
+		remove = os.Remove
+	}
+	for _, entry := range names {
+		name := entry.Name()
+		if name != base+".entries" {
+			generation, ok := strings.CutPrefix(name, base+".")
+			if !ok {
+				continue
+			}
+			generation, ok = strings.CutSuffix(generation, ".state")
+			if !ok {
+				continue
+			}
+			gen, err := strconv.ParseInt(generation, 10, 64)
+			if err != nil || gen <= 0 || strconv.FormatInt(gen, 10) != generation {
+				continue
 			}
 		}
+		if err := remove(filepath.Join(s.chatDir(), name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
-	c.gone = true
-	s.mu.Lock()
-	delete(s.chats, id)
-	s.mu.Unlock()
-	return nil
+	d, err := os.Open(s.chatDir())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	return d.Sync()
 }
 
 func (s *jsonStore) AppendEntry(_ context.Context, id string, e session.Entry) (int64, error) {

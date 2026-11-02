@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
+
+	"github.com/mudler/LocalAI/core/services/studio/internal/dberr"
 
 	"gorm.io/gorm"
 
@@ -133,14 +136,17 @@ type pendingRow struct {
 
 func (pendingRow) TableName() string { return "studio_pending" }
 
-type gormStore struct{ db *gorm.DB }
+type gormStore struct {
+	db       *gorm.DB
+	memoryMu sync.Mutex
+}
 
 // NewGORM returns a Store on db (SQLite or PostgreSQL) and creates its tables.
 func NewGORM(db *gorm.DB) (Store, error) {
 	if db == nil {
 		return nil, errors.New("studio store: nil *gorm.DB")
 	}
-	if err := db.AutoMigrate(&chatRow{}, &entryRow{}, &pendingRow{}); err != nil {
+	if err := db.AutoMigrate(&chatRow{}, &entryRow{}, &pendingRow{}, &memoryRequestRow{}, &captureStateRow{}, &captureKeyRow{}); err != nil {
 		return nil, fmt.Errorf("studio store: migrate: %w", err)
 	}
 	return &gormStore{db: db}, nil
@@ -281,7 +287,7 @@ func (s *gormStore) CreateChat(ctx context.Context, rec session.ChatRecord) erro
 
 func (s *gormStore) GetChat(ctx context.Context, principal, id string) (session.ChatRecord, error) {
 	var row chatRow
-	err := s.db.WithContext(ctx).Where("id = ? AND principal = ?", id, principal).Take(&row).Error
+	err := dberr.ReadDB(ctx, s.db).Where("id = ? AND principal = ?", id, principal).Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return session.ChatRecord{}, session.ErrNotFound
 	}
@@ -590,7 +596,27 @@ func (s *gormStore) DeleteChat(ctx context.Context, principal, id string) error 
 		if err := tx.Where("chat_id = ?", id).Delete(&entryRow{}).Error; err != nil {
 			return err
 		}
-		return tx.Where("chat_id = ?", id).Delete(&pendingRow{}).Error
+		if err := tx.Where("chat_id = ?", id).Delete(&pendingRow{}).Error; err != nil {
+			return err
+		}
+		var row captureStateRow
+		if err := tx.Where("chat_id = ?", id).Limit(1).Find(&row).Error; err != nil {
+			return err
+		}
+		var d captureData
+		if len(row.Data) > 0 {
+			if err := json.Unmarshal(row.Data, &d); err != nil {
+				return err
+			}
+		}
+		row.ChatID = id
+		row.Data, _ = json.Marshal(tombstoneCapture(d))
+		if err := tx.Save(&row).Error; err != nil {
+			return err
+		}
+		// Frozen requests belong to this chat incarnation. Delete them under
+		// the same row lock and transaction so recreation cannot reuse them.
+		return tx.Where("chat_id = ?", id).Delete(&memoryRequestRow{}).Error
 	})
 }
 

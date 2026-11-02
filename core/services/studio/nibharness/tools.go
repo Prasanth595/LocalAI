@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/mudler/cogito"
 
 	"github.com/mudler/LocalAI/core/services/studio/session"
 )
@@ -69,7 +70,8 @@ func newToolServer(tools []session.Tool) (*toolServer, mcp.Transport, []string, 
 		run := tl.Run
 		srv.AddTool(&mcp.Tool{Name: wireName(tl.Name), Description: tl.Description, InputSchema: schema},
 			func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				out, err := run(ctx, req.Params.Arguments)
+				id, _ := req.Params.Meta[cogito.MCPToolCallIDMetaKey].(string)
+				out, err := run(session.WithToolInvocation(ctx, id), req.Params.Arguments)
 				if err != nil {
 					return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, nil
 				}
