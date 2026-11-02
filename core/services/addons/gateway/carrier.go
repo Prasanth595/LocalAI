@@ -461,6 +461,13 @@ func typedError(w http.ResponseWriter, e error) {
 		_ = json.NewEncoder(w).Encode(resourceWire{Type: wireInvalid})
 		return
 	}
+	var requirements *addons.HostRequirementsRefusal
+	if errors.As(e, &requirements) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(sdkWire{Type: "host_requirements", HostOperations: &requirements.Summary})
+		return
+	}
 	var refusal *contract.SDKRefusal
 	if errors.As(e, &refusal) {
 		// The administrator is told why the add-on cannot be installed. Only
@@ -530,10 +537,11 @@ func IsOperationCause(code string) bool {
 const wireSDK = "sdk_incompatible"
 
 type sdkWire struct {
-	Type string `json:"type"`
-	Min  uint64 `json:"min"`
-	Max  uint64 `json:"max"`
-	Host uint64 `json:"host"`
+	HostOperations *hostops.RequestSummary `json:"hostOperations,omitempty"`
+	Type           string                  `json:"type"`
+	Min            uint64                  `json:"min"`
+	Max            uint64                  `json:"max"`
+	Host           uint64                  `json:"host"`
 }
 
 // SDKRefusalError is the error of a failed operation whose cause is an SDK
@@ -684,8 +692,13 @@ func (c *Carrier) send(ctx context.Context, a contract.Actor, wire wireRequest) 
 				return nil, resourceReplyError(resp.Body, resp.StatusCode, wire.Request.OperationID)
 			}
 			var b sdkWire
-			if decode(io.LimitReader(resp.Body, 4096), &b) == nil {
+			if decode(io.LimitReader(resp.Body, 32768), &b) == nil {
 				switch b.Type {
+				case "host_requirements":
+					if b.HostOperations != nil {
+						return nil, fmt.Errorf("%w: %w", addons.ErrOperationFailed, &addons.HostRequirementsRefusal{Summary: *b.HostOperations})
+					}
+					return nil, ErrForbidden
 				case wireSDK:
 					return nil, SDKRefusalError(&contract.SDKRefusal{Min: b.Min, Max: b.Max, Host: b.Host})
 				case wirePackage:
@@ -712,7 +725,7 @@ func (c *Carrier) send(ctx context.Context, a contract.Actor, wire wireRequest) 
 			// The owner's typed refusal is a decision, not an outage: nothing
 			// was applied and the same call is refused again.
 			var b resourceWire
-			if decode(io.LimitReader(resp.Body, 4096), &b) == nil && b.Type == wireInvalid {
+			if decode(io.LimitReader(resp.Body, 32768), &b) == nil && b.Type == wireInvalid {
 				return nil, ErrInvalidRequest
 			}
 		}
