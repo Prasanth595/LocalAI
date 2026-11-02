@@ -62,6 +62,7 @@ import (
 	"github.com/mudler/LocalAI/core/services/studio/store"
 	"github.com/mudler/LocalAI/core/services/studio/textindex"
 	"github.com/mudler/LocalAI/core/services/studio/triggers"
+	"github.com/mudler/LocalAI/core/services/studiohistory"
 	"github.com/mudler/LocalAI/core/services/voiceprofile"
 	"github.com/mudler/LocalAI/core/services/voicerecognition"
 	"github.com/mudler/LocalAI/core/templates"
@@ -176,9 +177,10 @@ type Application struct {
 	studioTempDir         string                 // removed at shutdown; set only in memory-only mode
 	studioHostExec        *hostexec.Runner       // the chats' built-in bash on this machine
 	studioFiles           *files.Service
-	studioFilesIndex      io.Closer          // the JSON index of the workspace; nil when it uses the database
-	studioFilesTemp       string             // blob cache folder of a cluster with no data path; removed at shutdown
-	studioTextIndex       *textindex.Indexer // the text of the documents in the files; nil when files are off
+	studioFilesIndex      io.Closer            // the JSON index of the workspace; nil when it uses the database
+	studioFilesTemp       string               // blob cache folder of a cluster with no data path; removed at shutdown
+	studioTextIndex       *textindex.Indexer   // the text of the documents in the files; nil when files are off
+	studioHistoryStore    *studiohistory.Store // the Studio add-on's generation history; see initStudioHistoryStore
 	authDB                *gorm.DB
 	metricsService        *monitoring.LocalAIMetricsService
 	statsRecorder         *billing.Recorder
@@ -406,6 +408,12 @@ func (a *Application) VoiceRegistry() voicerecognition.Registry {
 // recognition embeddings rather than synthesis reference audio.
 func (a *Application) VoiceProfileStore() *voiceprofile.Store {
 	return a.voiceProfileStore
+}
+
+// StudioHistoryStore returns the server-side Studio history store, or nil
+// when the WebUI is disabled or there is no auth database.
+func (a *Application) StudioHistoryStore() *studiohistory.Store {
+	return a.studioHistoryStore
 }
 
 // AuthDB returns the auth database connection, or nil if auth is not enabled.
@@ -864,6 +872,21 @@ func (a *Application) start() (startErr error) {
 // CollectionsService returns the knowledge-base collections of the server, or
 // nil while they start or when the feature is off.
 func (a *Application) CollectionsService() *collections.Service { return a.collectionsService.Load() }
+
+// initStudioHistoryStore initializes the Studio history store in the shared
+// auth database, after it is opened. It stays nil (the Studio keeps its
+// history in localStorage) when the WebUI is disabled or auth is off.
+func (a *Application) initStudioHistoryStore() {
+	if a.applicationConfig.DisableWebUI || a.authDB == nil {
+		return
+	}
+	store, err := studiohistory.New(a.authDB)
+	if err != nil {
+		xlog.Warn("Studio history persistence disabled: failed to initialise store", "error", err)
+		return
+	}
+	a.studioHistoryStore = store
+}
 
 // StartCollections starts the collections service. Like the agent pool it runs
 // after the HTTP server is listening, because the vector engines call the
