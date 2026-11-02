@@ -416,3 +416,23 @@ and that the database and the backups are untouched.
   runtime client types the add-on's HTTP 400 and 422 as a refusal, and the host answers
   it the same way from the apply, read, proposal, chat and artifact paths, and from the
   owner and every frontend. The authorization specs pin the exact status.
+
+
+## Upgrade submission and observation regressions
+
+- [ ] `go test -race ./core/services/addons ./core/services/addons/gateway ./core/services/addons/recovery -count=1`
+- [ ] `cd core/http/react-ui && node --test tests/unit/updatereview.test.mjs`
+- [ ] `cd core/http/react-ui && npm run build`
+- [ ] Verify cancellation during the real verified-backup path does not cancel
+      an accepted upgrade or prevent its package commit.
+- [ ] Verify status reads and same-ID retries through two real mTLS frontends
+      remain available while backup exceeds an injected ordinary client deadline.
+- [ ] Verify payload conflicts, actor isolation, terminal receipt replay after
+      restart, interruption without replay, and Close cancellation/join behavior.
+- [ ] Verify browser reload observes the stored ID, account switching isolates
+      records, logout clears records, and progress does not invent percentages.
+
+The recovery suite above remains required for crash boundaries during backup,
+staging, migration and publication, including format-changing recovery-required
+outcomes. The focused submission tests do not replace the real executable,
+real-auth HTTP or rendered-browser acceptance gates.
